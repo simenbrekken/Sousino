@@ -8,7 +8,6 @@
 
 // PID Library
 #include <PID_v1.h>
-#include <PID_AutoTune_v0.h>
 
 // EEPROM
 #include <EEPROMEx.h>
@@ -21,41 +20,33 @@ const int RELAY_PIN = 9;
 const int SENSOR_PIN = 10;
 
 // PID
-const unsigned int PID_SAMPLE_TIME = 1000;
+const unsigned int SAMPLE_TIME = 1000;
 const unsigned int WINDOW_SIZE = 10000;
 
 double input;
-double target = 60;
-double output = 50;
+double target;
+double output;
 
-double pidP = 850;
-double pidI = 0.25;
-double pidD = 0.1;
+// Values tuned for 1.5L 500W rice cooker (http://www.clasohlson.com/no/Riskoker/34-9719)
+double kP = 875;
+double kI = 0.5;
+double kD = 0.1;
 
 volatile long onTime = 0; // How long to keep the relay on
 unsigned long windowStartTime;
+unsigned long now;
 
-PID pid(&input, &output, &target, pidP, pidI, pidD, DIRECT);
-
-// PID Tuner
-const double TUNER_OUTPUT_STEP = 500;
-const double TUNER_NOISE_BAND = 1;
-const unsigned int TUNER_LOOKBACK_DURATION = 20;
-
-boolean tuning = false;
-
-PID_ATune pidTuner(&input, &output);
+PID pid(&input, &output, &target, kP, kI, kD, DIRECT);
 
 // EEPROM
 const unsigned int EEPROM_TARGET = 0;
-const unsigned int EEPROM_P = 8;
-const unsigned int EEPROM_I = 16;
-const unsigned int EEPROM_D = 24;
 
 // Sensor
 OneWire oneWire(SENSOR_PIN);
 DallasTemperature sensors(&oneWire);
 DeviceAddress temperatureSensor;
+
+double temperature;
 
 // LCD
 serLCD lcd(LCD_PIN);
@@ -67,9 +58,9 @@ boolean buttonRight = 0;
 void setup() {
   Serial.begin(9600);
 
+  loadConfiguration();
+  
   showSplashScreen(2000);
-
-  // loadConfiguration();
   showCookingScreen();
 
   setupTemperatureSensor();
@@ -80,65 +71,40 @@ void setup() {
 }
 
 void loop() {
-  while (true) {
-    readButtons();
-    
-    if (buttonLeft && buttonRight) {
-      if (tuning) {
-        stopTuning();
-      } else {
-        startTuning();
-      }
-    } else if (buttonLeft || buttonRight) {
-      if (buttonLeft) {
-        target -= 0.5;
-      } else {
-        target += 0.5;
-      }
+  readButtons();
+  readTemperature();
 
-      delay(200);
-    }
+  updatePID();
+  updateCookingScreen();
 
-    readTemperature();
-
-    if (tuning) {
-      updatePIDTuner();
-    } else {
-      updatePID();
-    }
-
-    onTime = output;
-
-    updateCookingScreen();
-
-    delay(100);
-  }
+  delay(100);
 }
 
 void showSplashScreen(int duration) {
   lcd.clear();
   lcd.print(F("    Sousino!    "));
-  lcd.print(F("      v0.1      "));
+  lcd.print(F("      v1.0      "));
 
   delay(duration);
 }
 
 void showCookingScreen() {
   lcd.clear();
-  lcd.print(F("Temp:"));
+  lcd.print(F("Current:"));
   lcd.selectLine(2);
-  lcd.print(F("Target:"));
+  lcd.print(F(" Target:"));
 }
 
 void setupTemperatureSensor() {
   sensors.begin();
   sensors.getAddress(temperatureSensor, 0);
-  sensors.setResolution(temperatureSensor, 10);
+  sensors.setResolution(temperatureSensor, 12);
   sensors.setWaitForConversion(false);
 }
 
 void setupPID() {
-  pid.SetSampleTime(PID_SAMPLE_TIME);
+  pid.SetTunings(kP, kI, kD);
+  pid.SetSampleTime(SAMPLE_TIME);
   pid.SetOutputLimits(0, WINDOW_SIZE);
   pid.SetMode(AUTOMATIC);
 }
@@ -168,110 +134,76 @@ void setupButtons() {
 void readButtons() {
   buttonLeft = digitalRead(BUTTON_LEFT_PIN);
   buttonRight = digitalRead(BUTTON_RIGHT_PIN);
+
+  if (buttonLeft) {
+    target -= 0.5;
+  } else if (buttonRight) {
+    target += 0.5;
+  }  
 }
 
 void readTemperature() {
   if (sensors.isConversionAvailable(0)) {
-    input = sensors.getTempC(temperatureSensor);
+    temperature = sensors.getTempC(temperatureSensor);
+    
+    // Correct for noise
+    if (temperature > 0) {
+      input = temperature;
+    }
+    
     sensors.requestTemperatures();
     
-    Serial.print(1);
-    Serial.print(F(","));
-    Serial.print(target);
-    Serial.print(F(","));
-    Serial.print(input);
-    Serial.print(F(","));
-    Serial.println(tuning ? 1 : 0);
+    // MegunoLink Lite (http://www.megunolink.com/megunolink-lite) 
+    // Input
+    Serial.print(F("{Input,T,"));
+    Serial.print(input, 2);
+    Serial.println(F("}"));    
+    
+    // Target
+    Serial.print(F("{Target,T,"));
+    Serial.print(target, 2);
+    Serial.println(F("}"));    
+    
+    // Target
+    Serial.print(F("{Output,T,"));
+    Serial.print(output / 100, 2);
+    Serial.println(F("}"));
   }
 }
 
 void updateCookingScreen() {
   // Current
-  lcd.setCursor(1, 7);
+  lcd.setCursor(1, 10);
   lcd.print(input, 1);
 
   // Target
-  lcd.setCursor(2, 9);
+  lcd.setCursor(2, 10);
   lcd.print(target, 1);
-
-  // PID output
-  lcd.setCursor(1, 12);
-  lcd.print("     ");
-  lcd.setCursor(1, 12);
-  lcd.print(output, 0);
-
-  // Tuning
-  lcd.setCursor(2, 16);
-  lcd.print(tuning ? "T" : " ");
 }
 
 void updatePID() {
   pid.Compute();
+
+  onTime = output;
 }
 
 void updateRelay() {
-  long now = millis();
+  now = millis();
 
   if (now - windowStartTime > WINDOW_SIZE) {
     windowStartTime += WINDOW_SIZE;
   }
-  
+
   digitalWrite(RELAY_PIN, onTime > 100 && onTime > (now - windowStartTime));
-}
-
-void startTuning() {
-  //Serial.println(F("Starting tuner"));
-
-  tuning = true;
-
-  pid.SetMode(MANUAL);
-
-  pidTuner.SetNoiseBand(TUNER_NOISE_BAND);
-  pidTuner.SetOutputStep(TUNER_OUTPUT_STEP);
-  pidTuner.SetLookbackSec((int)TUNER_LOOKBACK_DURATION);
-}
-
-void stopTuning() {
-  //Serial.println(F("Done tuning"));
-
-  tuning = false;
-
-  pid.SetMode(AUTOMATIC);
-
-  pidTuner.Cancel();
-}
-
-void updatePIDTuner() {
-  if (pidTuner.Runtime()) {
-    Serial.print(2);
-    Serial.print(F(", "));
-    Serial.print(pidTuner.GetKp());
-    Serial.print(F(", "));
-    Serial.print(pidTuner.GetKi());
-    Serial.print(F(", "));
-    Serial.println(pidTuner.GetKd());
-
-    tuning = false;
-
-    pidP = pidTuner.GetKp();
-    pidI = pidTuner.GetKi();
-    pidD = pidTuner.GetKd();
-
-    pid.SetTunings(pidP, pidI, pidD);
-    pid.SetMode(AUTOMATIC);
-  }
 }
 
 void saveConfiguration() {
   EEPROM.updateDouble(EEPROM_TARGET, target);
-  EEPROM.updateDouble(EEPROM_P, pidP);
-  EEPROM.updateDouble(EEPROM_I, pidI);
-  EEPROM.updateDouble(EEPROM_D, pidD);
 }
 
 void loadConfiguration() {
   target = EEPROM.readDouble(EEPROM_TARGET);
-  pidP = EEPROM.readDouble(EEPROM_P);
-  pidI = EEPROM.readDouble(EEPROM_I);
-  pidD = EEPROM.readDouble(EEPROM_D);
+  
+  // Default values
+  if (isnan(target)) target = 55;
 }
