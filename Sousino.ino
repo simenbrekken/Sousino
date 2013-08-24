@@ -154,14 +154,15 @@ void readTemperature() {
     sensors.requestTemperatures();
     
     // MegunoLink Lite (http://www.megunolink.com/megunolink-lite) 
-    // Input
-    Serial.print(F("{Input,T,"));
-    Serial.print(input, 2);
-    Serial.println(F("}"));    
-    
+
     // Target
     Serial.print(F("{Target,T,"));
     Serial.print(target, 2);
+    Serial.println(F("}"));    
+    
+    // Input
+    Serial.print(F("{Input,T,"));
+    Serial.print(input, 2);
     Serial.println(F("}"));    
     
     // Target
